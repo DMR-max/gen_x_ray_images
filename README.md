@@ -15,3 +15,5 @@ Steps to run comparison between one algorithm:
 Steps to run the comparison between all algorihms
 0. Make sure you have ran the 32 image size versions of the diffuison model and the VAE. Also make sure to have ran the baseline versions of the autoregressive model and the GAN.
 1. Run discvsall.py for the discriminator vs all the other models, Run the classifier.py for the classifier.
+
+In case there are bugs in the program please run the files from the in case of bugs folder and manually change the parameters.
