@@ -1,4 +1,4 @@
-# gen_x_ray_images
+# Deep learning algorithms for training data: focused on chest X-ray images
 This readme explains how to run the experiments.
 Steps to train one algorithm:
 1. install python, pytorch, matplotlib, huggingface libraries from the requirements.txt file.
