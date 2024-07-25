@@ -74,7 +74,7 @@ def main():
     # Number of hidden dimensions in the discriminator
     HIDDEN_DIM_DISCR = 128
     # Number of epochs to train the GAN
-    EPOCH_NUM = 10
+    EPOCH_NUM = 50
     # Real and fake labels
     REAL_LABEL = 1
     FAKE_LABEL = 0

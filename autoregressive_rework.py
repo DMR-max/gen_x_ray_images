@@ -216,7 +216,7 @@ def main():
 	# Depth of the intermediate channels in the model
 	channels = 400  #prev 400
 	# No of epochs to train the model
-	epochs = 1 
+	epochs = 50 
 	# path where the NIH data is stored
 	dataset_path = input("where are the NIH images stored (all together not in different folders)?") 
 	# path where the training list is stored

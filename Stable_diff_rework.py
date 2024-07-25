@@ -44,7 +44,7 @@ class configuration:
     size_of_the_train_batch = 128
     # Number of images sampled when evaluating the model
     size_of_the_evaluation_batch = 128
-    total_epochs = 1
+    total_epochs = 50
     # Number of epochs between each evaluation (1 = off)
     gradient_acc_steps = 1
     # Learning rate

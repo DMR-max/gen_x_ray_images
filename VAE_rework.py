@@ -204,7 +204,7 @@ def main():
     # Set the learning rate
     lr = 1e-4
     # Set the amount of epochs
-    epochs = 2
+    epochs = 50
 
     version = input("Which version of the model do you want to train? 1 = learning rate, 2 = Image size, 3 = hidden dimensions, 4 = Baseline")
 
