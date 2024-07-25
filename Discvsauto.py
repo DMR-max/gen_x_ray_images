@@ -1,510 +1,677 @@
 import os
+import sys
+import math
+import tqdm
 import numpy as np
 import torch
 import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.parallel
+import torch.backends.cudnn as cudnn
+import torch.optim as optim
 import torch.utils.data
+import torchvision.transforms as transforms
+import torchvision.datasets as dset
+import torchvision.utils as vutils
 import matplotlib.pyplot as plt
 from PIL import Image
+import configparser
 
-# Class to load in images from the dataset
-class LoadImages:
-    # Initialize the class
-    def __init__(self, directory_of_images, file_with_labels, preprocessing):
-        # Set the directory of images
-        self.directory_of_images = directory_of_images
-        # Set the preprocessing function
-        self.preprocessing = preprocessing
-        # Initialize the list of data locations
-        self.data = []
+class CustomImageDataset(torch.utils.data.Dataset):
+    def __init__(self, folder, txt_file, trans=None):
+        self.folder = folder
+        self.trans = trans
+        self.image_names = []
+        self.target = []
 
-        # Open the file with labels open as read
-        with open(file_with_labels, "r") as current_file:
-            # Read all lines in the file
-            lines_in_file = current_file.readlines()
-            # Loop through all lines in the file
-            for current_line in lines_in_file:
-                # Split the current line by the last underscore
-                current_line = current_line.strip().rsplit("_", 0)
-                # Add the current line to the list of image data locations
-                self.data.append(current_line)
-    
-    # Get the length of the data list
+        # Read the txt file containing information about dataset split and possibly labels
+        with open(txt_file, 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                target, _ = line.strip().rsplit("_",1)  # Assuming each line contains image_name and target label
+                image_name = line.strip()
+                self.image_names.append(image_name)
+                self.target.append(int(target))  # Convert target to int
+
     def __len__(self):
-        # The amount of images found in the list
-        return len(self.data)
-    
-    # Get the item at the index
-    def __getitem__(self, idx):
-        # Get the image location
-        image_name = self.directory_of_images + "/" + self.data[idx][0]
-        # Open the image with index idx
-        curr_img = Image.open(image_name)\
-        
-        # Check if the image is grayscale and normalized (check that transform is applied)
-        if self.preprocessing is not None:
-            curr_img = self.preprocessing(curr_img)
-        
-        return curr_img
+        return len(self.image_names)
 
-class Disc(torch.nn.Module):
-    def __init__(self, RGB_CHANNEL, HIDDEN_DIM_DISCR, resolution):
-        torch.nn.Module.__init__(self)
-        if resolution == 64:
-            self.net = torch.nn.Sequential(
-                # first layer
-                torch.nn.Conv2d(RGB_CHANNEL, HIDDEN_DIM_DISCR, 4, 2, 1, bias=False),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # second layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR, HIDDEN_DIM_DISCR * 2, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 2),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # third layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 2, HIDDEN_DIM_DISCR * 4, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 4),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # fourth layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 4, HIDDEN_DIM_DISCR * 8, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 8),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # Sigmoid is for binary classification problems, as the output is between 0 and 1. 1 = real 0 = fake.
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 8, 1, 4, 1, 0, bias=False),
-                torch.nn.Sigmoid()
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.folder, self.image_names[idx])
+        image = Image.open(img_name)
+
+        if self.trans:
+            image = self.trans(image)
+
+        target = self.target[idx]
+        return image, target  
+    
+
+class Discriminator(nn.Module):
+    def __init__(self, IMAGE_CHANNEL, D_HIDDEN, img_size):
+        super(Discriminator, self).__init__()
+        if img_size == 64:
+            self.main = nn.Sequential(
+                # 1st layer
+                nn.Conv2d(IMAGE_CHANNEL, D_HIDDEN, 4, 2, 1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                # 2nd layer
+                nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 2),
+                nn.LeakyReLU(0.2, inplace=True),
+                # 3rd layer
+                nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 4),
+                nn.LeakyReLU(0.2, inplace=True),
+                # 4th layer
+                nn.Conv2d(D_HIDDEN * 4, D_HIDDEN * 8, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 8),
+                nn.LeakyReLU(0.2, inplace=True),
+
+                # nn.Conv2d(D_HIDDEN * 8, D_HIDDEN * 16, 4, 2, 1, bias=False),
+                # nn.BatchNorm2d(D_HIDDEN * 16),
+                # nn.LeakyReLU(0.2, inplace=True),
+                # output layer
+                nn.Conv2d(D_HIDDEN * 8, 1, 4, 1, 0, bias=False),
+                nn.Sigmoid()
             )
-        elif resolution == 128:
-            self.net = torch.nn.Sequential(
-                # first layer
-                torch.nn.Conv2d(RGB_CHANNEL, HIDDEN_DIM_DISCR, 4, 2, 1, bias=False),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # second layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR, HIDDEN_DIM_DISCR * 2, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 2),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # third layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 2, HIDDEN_DIM_DISCR * 4, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 4),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # fourth layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 4, HIDDEN_DIM_DISCR * 8, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 8),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # fifth layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 8, HIDDEN_DIM_DISCR * 16, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 16),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # Sigmoid is for binary classification problems, as it squashes the output to be between 0 and 1. 1 = real 0 = fake.
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 16, 1, 4, 1, 0, bias=False),
-                torch.nn.Sigmoid()
+        elif img_size == 128:
+            self.main = nn.Sequential(
+                # 1st layer
+                nn.Conv2d(IMAGE_CHANNEL, D_HIDDEN, 4, 2, 1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                # 2nd layer
+                nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 2),
+                nn.LeakyReLU(0.2, inplace=True),
+                # 3rd layer
+                nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 4),
+                nn.LeakyReLU(0.2, inplace=True),
+                # 4th layer
+                nn.Conv2d(D_HIDDEN * 4, D_HIDDEN * 8, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 8),
+                nn.LeakyReLU(0.2, inplace=True),
+
+                nn.Conv2d(D_HIDDEN * 8, D_HIDDEN * 16, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 16),
+                nn.LeakyReLU(0.2, inplace=True),
+                # output layer
+                nn.Conv2d(D_HIDDEN * 16, 1, 4, 1, 0, bias=False),
+                nn.Sigmoid()
             )
         else:
-            self.net = torch.nn.Sequential(
-                # first layer
-                torch.nn.Conv2d(RGB_CHANNEL, HIDDEN_DIM_DISCR, 4, 2, 1, bias=False),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # second layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR, HIDDEN_DIM_DISCR * 2, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 2),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # third layer
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 2, HIDDEN_DIM_DISCR * 4, 4, 2, 1, bias=False),
-                torch.nn.BatchNorm2d(HIDDEN_DIM_DISCR * 4),
-                torch.nn.LeakyReLU(0.2, inplace=True),
-                # Sigmoid is for binary classification problems, as it squashes the output to be between 0 and 1. 1 = real 0 = fake.
-                torch.nn.Conv2d(HIDDEN_DIM_DISCR * 4, 1, 4, 1, 0, bias=False),
-                torch.nn.Sigmoid()
-            )
+            self.main = nn.Sequential(
+                # 1st layer
+                nn.Conv2d(IMAGE_CHANNEL, D_HIDDEN, 4, 2, 1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                # 2nd layer
+                nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 2),
+                nn.LeakyReLU(0.2, inplace=True),
+                # # 3rd layer
+                nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, 4, 2, 1, bias=False),
+                nn.BatchNorm2d(D_HIDDEN * 4),
+                nn.LeakyReLU(0.2, inplace=True),
+                # # 4th layer
 
-    def forward(self, obj):
-        return self.net(obj).view(-1, 1).squeeze(1)
+                # nn.Conv2d(D_HIDDEN * 8, D_HIDDEN * 16, 4, 2, 1, bias=False),
+                # nn.BatchNorm2d(D_HIDDEN * 16),
+                # nn.LeakyReLU(0.2, inplace=True),
+                # output layer
+                nn.Conv2d(D_HIDDEN * 4, 1, 4, 1, 0, bias=False),
+                nn.Sigmoid()
+            )
+#The activation functions used in the output layers of the generator and discriminator in a Generative Adversarial Network (GAN) are chosen based on the nature of the data and the roles of the networks.
+
+# Generator (Tanh): The generator's goal is to generate data that resembles the real data. If the real data is images, these are often normalized to be in the range [-1, 1]. The Tanh activation function also outputs in the range [-1, 1], so it's a natural choice for the generator's output layer. This way, the output of the generator is already in the correct range to match the real data.
+
+# Discriminator (Sigmoid): The discriminator's goal is to classify its input as real or fake. This is a binary classification problem, and the Sigmoid activation function is commonly used in the output layer for such problems. The Sigmoid function outputs a value in the range [0, 1], which can be interpreted as the probability of the input being real. A value close to 0 indicates a fake classification, and a value close to 1 indicates a real classification.
+
+# These are common choices, but they're not the only possible ones. The best activation functions to use can depend on the specific characteristics of your data and model.
+
+    def forward(self, input):
+        return self.main(input).view(-1, 1).squeeze(1)
     
 def weights_init(m):
-    # Custom weights initialization called on netG and netD to help the models converge
     classname = m.__class__.__name__
-    # Initialize the weights of the convolutional and batch normalization layers
-    if 'Conv' in classname:
-        m.weight.data.normal_(mean=0.0, std=0.03)
-    elif 'BatchNorm' in classname:
-        m.weight.data.normal_(mean=1.0, std=0.03)
-        m.bias.data.zero_()
+    if classname.find('Conv') != -1:
+        m.weight.data.normal_(0.0, 0.02)
+    elif classname.find('BatchNorm') != -1:
+        m.weight.data.normal_(1.0, 0.02)
+        m.bias.data.fill_(0)
 
-def diversity_loss(img):
-    # Calculate the diversity loss of the generated images
-    res = img.size(0)
-    # Flatten the images to calculate the pairwise distances
-    img = img.view(res, -1)
-    total_loss = 0
-
-    # Manually compute pairwise distances
-    for i in range(res):
-        for j in range(i + 1, res):
-            distance_btwn_images = torch.norm(img[i] - img[j], p=2)
-            total_loss += distance_btwn_images
-    # Negative diversity loss, because we want to promote diversity
-    div_loss = -total_loss / (res * (res - 1) / 2)  
+def diversity_loss(fake):
+    n = fake.size(0)
+    fake = fake.view(n, -1)  # Flatten the images
+    dists = torch.cdist(fake, fake, p=2)
+    div_loss = -torch.mean(dists)  # Negative because we want to maximize diversity
     return div_loss
 
+# Function to show an image
+def imshow(img):
+    img = img / 2 + 0.5  # unnormalize
+    npimg = img.numpy()
+    plt.imshow(np.transpose(npimg, (1, 2, 0)))
+    plt.show()
     
-
-# Class to define the masked CNN
-class convolutional_NN_msk(torch.nn.Conv2d):
-	# Initialize the class
-	def __init__(self, msk_type, *arguments, **keywordedarguments):
-		# Set the mask type
-		self.mask_type = msk_type
-		torch.nn.Conv2d.__init__(self,*arguments, **keywordedarguments)
-		self.register_buffer('buffer_msk', self.weight.data.clone())
-
-		# Set the mask for the CNN
-		_, _, h, w = self.weight.size()
-		self.buffer_msk.fill_(1)
-		if msk_type =='A':
-			self.buffer_msk[:,:,h//2,w//2:] = 0
-		else:
-			self.buffer_msk[:,:,h//2,w//2+1:] = 0
-		self.buffer_msk[:,:,h//2+1:,:] = 0
-
-	# Propagation through the neural network
-	def forward(self, input):
-		self.weight.data*=self.buffer_msk
-		return torch.nn.Conv2d.forward(self,input)
-
-# Class to define the autoregressive CNN
-class Model(torch.nn.Module):
-	# Initialize the class
-	def __init__(self, layer_numb=8, size_kernel = 7, ch_numb=64, dev=None):
-		torch.nn.Module.__init__(self)
-		# Set the amount of layers
-		self.amount_of_layers = layer_numb
-		# Set the kernel size
-		self.kernel_size = size_kernel
-		# Set the number of channels
-		self.ch_numb = ch_numb
-		# Set the device
-		self.layer = {}
-		# Set the device
-		self.dev = dev
-
-		# Set the first layer
-		# A is so that the model does not have access to the future information the model is trying to predict
-		self.Convolutional_first_layer = convolutional_NN_msk('A',1,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_first_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_first_layer = torch.nn.ReLU(True)
-
-		# Set the second layer
-		# B is so that the model does have access to the future information the model is trying to predict
-		# Should help in learning more complex patterns
-		self.Convolutional_second_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_second_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_second_layer = torch.nn.ReLU(True)
-
-		# Set the third layer
-		self.Convolutional_third_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_third_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_third_layer = torch.nn.ReLU(True)
-
-		# Set the fourth layer
-		self.Convolutional_fourth_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_fourth_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_fourth_layer = torch.nn.ReLU(True)
-
-		# Set the fifth layer
-		self.Convolutional_fifth_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_fifth_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_fifth_layer = torch.nn.ReLU(True)
-
-		# Set the sixth layer
-		self.Convolutional_sixth_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_sixth_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_sixth_layer = torch.nn.ReLU(True)
-
-		# Set the seventh layer
-		self.Convolutional_seventh_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_seventh_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_seventh_layer = torch.nn.ReLU(True)
-
-		# Set the eighth layer
-		self.Convolutional_eight_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-		self.Normalization_eight_layer = torch.nn.BatchNorm2d(ch_numb)
-		self.Activation_func_eight_layer = torch.nn.ReLU(True)
-
-		if self.amount_of_layers == 10:
-			# Set the ninth layer
-			self.Convolutional_nineth_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-			self.Normalization_nineth_layer = torch.nn.BatchNorm2d(ch_numb)
-			self.Activation_func_nineth_layer = torch.nn.ReLU(True)
-
-			# Set the tenth layer
-			self.Convolutional_tenth_layer = convolutional_NN_msk('B',ch_numb,ch_numb, size_kernel, 1, size_kernel//2, bias=False)
-			self.Normalization_tenth_layer = torch.nn.BatchNorm2d(ch_numb)
-			self.Activation_func_tenth_layer = torch.nn.ReLU(True)
-
-		# Set the output layer
-		self.out = torch.nn.Conv2d(ch_numb, 256, 1)
-
-	def forward(self, input):
-		# Forward pass of all the layers
-		input = self.Convolutional_first_layer(input)
-		input = self.Normalization_first_layer(input)
-		input = self.Activation_func_first_layer(input)
-
-		input = self.Convolutional_second_layer(input)
-		input = self.Normalization_second_layer(input)
-		input = self.Activation_func_second_layer(input)
-
-		input = self.Convolutional_third_layer(input)
-		input = self.Normalization_third_layer(input)
-		input = self.Activation_func_third_layer(input)
-
-		input = self.Convolutional_fourth_layer(input)
-		input = self.Normalization_fourth_layer(input)
-		input = self.Activation_func_fourth_layer(input)
-
-		input = self.Convolutional_fifth_layer(input)
-		input = self.Normalization_fifth_layer(input)
-		input = self.Activation_func_fifth_layer(input)
-
-		input = self.Convolutional_sixth_layer(input)
-		input = self.Normalization_sixth_layer(input)
-		input = self.Activation_func_sixth_layer(input)
-
-		input = self.Convolutional_seventh_layer(input)
-		input = self.Normalization_seventh_layer(input)
-		input = self.Activation_func_seventh_layer(input)
-
-		input = self.Convolutional_eight_layer(input)
-		input = self.Normalization_eight_layer(input)
-		input = self.Activation_func_eight_layer(input)
-
-		if self.amount_of_layers == 10:
-
-			input = self.Convolutional_nineth_layer(input)
-			input = self.Normalization_nineth_layer(input)
-			input = self.Activation_func_nineth_layer(input)
-
-			input = self.Convolutional_tenth_layer(input)
-			input = self.Normalization_tenth_layer(input)
-			input = self.Activation_func_tenth_layer(input)
-
-		# Output layer
-		return self.out(input)
-
-def main():
-    os.chdir("..")
-    version = input("Which version of the model do you want to make a graph of? 1 = learning rate, 2 = Image size, 3 = Baseline")
-    baseline_path = input("what is the checkpoint location of the baseline model?")
-    if version == '1' or version == '2':
-        input_model_1 = input("what is the checkpoint location of the second model? (for learning rate 5e-4, for image size 32)")
-        input_model_2 = input("what is the checkpoint location of the third model? (for learning rate 1e-5, for image size 128)")
-    location_of_discriminator = input("What is the location of the discriminator?")
-    if version == 2:
-        location_of_discriminator_32 = input("What is the location of the (32 x 32) discriminator?")
-        location_of_discriminator_128 = input("What is the location of the (128 x 128) discriminator?")
-    # Flag to use CUDA
-    CUDA = True
-    # Batch size for training
-    SIZE_OF_BATCH = 128
-    # Number of channels in the RGB image (1 channel = grayscale)
-    RGB_CHANNEL = 1
-    # Size of the input noise vector
-    INPUT_NOISE_VECTOR = 100
-    # Dimensions of the image
-    DIM_IMAGE = 64
-    # Number of hidden layers in the discriminator
-    HIDDEN_DIM_DISCR = 64
-    # Number of epochs to train the GAN
-    EPOCH_NUM = 24
-    # Real and fake labels
-    R_LABEL = 1
-    F_LABEL = 0
-    # Learning rate for the GAN	
-    lr = 1e-4
-
-    # Define the device
-    if torch.cuda.is_available() and CUDA:
-        dev = torch.device("cuda:0")
-    else:
-        dev = torch.device("cpu")
-    print(dev)
-
-    directory_of_images = input("What is the directory of the images? (all together not in different folders)")
-    location_of_txt_file = input("What is the location of the txt file with the train value names?")
-    location_of_txt_file_test = input("What is the location of the txt file with the test value names?")
-
-    if version == "2":
-        image_size_list = [32, 64, 128]
-    else:
-        image_size_list = [64]
-    if version == "1":
-        lr_list = [1e-4, 5e-4, 1e-5]
-    else:
-        lr_list = [1e-4]
-    for lr in lr_list:
-        for image_size in image_size_list:
-            DIM_IMAGE = image_size
-            # Define the transformation for the images (resize, grayscale, from PIL Image to tensor, normalize with mean 0,5 and standard deviation 0,5)
-            transform_params = torchvision.transforms.Compose(
-                [
-                    torchvision.transforms.Resize((DIM_IMAGE, DIM_IMAGE)),
-                    torchvision.transforms.RandomHorizontalFlip(),
-                    torchvision.transforms.Grayscale(num_output_channels=1),
-                    torchvision.transforms.ToTensor(),
-                ]
-            )
-
-            # Create instance of dataset
-            training_set = LoadImages(directory_of_images, location_of_txt_file, transform_params)
-            testing_set = LoadImages(directory_of_images, location_of_txt_file_test, transform_params)
-
-            # Create DataLoaders for training and testing sets
-            train = torch.utils.data.DataLoader(training_set, batch_size=SIZE_OF_BATCH, shuffle=True)
-            test = torch.utils.data.DataLoader(testing_set, batch_size=SIZE_OF_BATCH, shuffle=True)
-
-
-            # Create the discriminator
-            Disc_net = Disc(RGB_CHANNEL, HIDDEN_DIM_DISCR, DIM_IMAGE).to(dev)
-            Disc_net.load_state_dict(torch.load(location_of_discriminator))
-            # Initialize BCELoss function
-            BCE_crit = nn.BCELoss()
-
-            # Create batch of latent vectors
-            Create_noise = torch.randn(SIZE_OF_BATCH, INPUT_NOISE_VECTOR, 1, 1, device=dev)
-
-            # Setup Adam optimizers to help with the training of the GAN to stabilize the training
-            Adam_optim = torch.optim.Adam(Disc_net.parameters(), lr=lr, betas=(0.4999, 0.999))
-
-            # Lists to keep track of progress
-            list_of_images = []
-            loss_of_gen = []
-            loss_of_disc = []
-
-
-
-            print("Starting Training Loop...")
-            print("Starting Testing Loop...")
-            # list_of_disc_errors_500 = [3.67794132232666, 3.503178119659424, 3.6076016426086426, 3.2208688259124756, 3.860383987426758, 3.8884263038635254, 3.5787596702575684, 4.286342144012451, 3.7707061767578125, 3.720978021621704, 3.254955530166626, 3.0980122089385986, 3.4185142517089844, 3.418964147567749, 3.989417314529419, 3.519407272338867, 3.5756218433380127, 4.06866455078125, 3.508878231048584, 3.6577486991882324, 3.6472702026367188, 4.0691304206848145, 3.7421486377716064, 3.6138362884521484, 4.099040508270264 ]
-            # list_of_disc_errors_300 = [69.31978607177734, 69.20040130615234, 69.24744415283203, 69.27139282226562, 69.21062469482422, 69.39337921142578, 69.55066680908203, 69.40667724609375, 69.22758483886719, 69.4830551147461, 69.5771713256836, 69.32005310058594, 69.31959533691406, 69.28053283691406, 69.39614868164062, 69.37401580810547, 69.03463745117188, 69.16797637939453, 69.31694793701172, 68.93363952636719, 69.4273910522461, 69.13243103027344, 69.41190338134766, 69.30957794189453, 69.27418518066406 ]
-            # list_of_disc_errors_baseline = [23.622438430786133, 24.197343826293945, 23.40094566345215, 23.98157501220703, 23.79994010925293, 23.728822708129883, 23.974998474121094, 23.890085220336914, 24.14176368713379, 23.74187660217285, 23.650381088256836, 24.00697135925293, 24.07979393005371, 23.579343795776367, 24.249757766723633, 23.928030014038086, 23.831193923950195, 23.691335678100586, 23.59296226501465, 23.849149703979492, 23.411224365234375, 23.728271484375,24.34131622314453, 23.822879791259766, 24.16730499267578 ]
-            list_of_epochs = np.arange(0, EPOCH_NUM, 1)
-            # list_of_disc_errors_500 = [18.82244873046875,18.918537139892578, 19.124990463256836, 18.5001220703125, 19.009017944335938, 18.741548538208008, 18.939895629882812, 18.613489151000977, 19.12775993347168, 19.06594467163086, 18.558467864990234, 18.073972702026367, 18.947999954223633, 18.942468643188477, 18.720260620117188, 19.045827865600586, 18.850317001342773, 18.98076820373535, 18.432954788208008, 18.444000244140625, 19.335107803344727, 18.65494728088379, 18.569318771362305, 18.9158935546875 ]
-            # list_of_disc_errors_300 = [26.757959365844727, 26.80496597290039, 26.54191017150879, 26.69702911376953, 26.790878295898438, 26.674758911132812, 26.609771728515625, 26.883424758911133, 26.8837947845459, 26.916271209716797, 26.763290405273438, 26.727956771850586, 26.631988525390625, 27.034324645996094, 26.825286865234375, 27.003862380981445, 26.634309768676758, 26.861234664916992, 26.896944046020508, 26.71302604675293, 27.313766479492188, 26.183168411254883, 26.706396102905273, 26.690881729125977 ]
-            # list_of_disc_errors_baseline = [34.59003829956055, 33.089088439941406, 32.711219787597656, 31.56462287902832, 29.641326904296875, 23.40835952758789, 27.863941192626953, 17.428369522094727, 20.87794303894043, 6.416240215301514, 26.180452346801758, 21.99127197265625, 18.7678165435791, 24.87398910522461, 21.016145706176758, 13.378898620605469, 21.922250747680664, 17.909151077270508, 21.157373428344727, 18.828563690185547, 20.63825798034668, 19.880434036254883, 20.312255859375, 15.060330390930176 ]
-            list_of_disc_errors_baseline = np.zeros(EPOCH_NUM)
-            list_of_disc_errors_300 = np.zeros(EPOCH_NUM)
-            list_of_disc_errors_500 = np.zeros(EPOCH_NUM)
-            fig, plt1 = plt.subplots()
-            plt1.set_xlabel('Epoch')
-            plt1.set_ylabel('Discriminator Loss')      
-            plt1.set_title("Discriminator Loss vs epoch Autoregressive model")
-            if version == "1" or version == "2":
-                paths = [baseline_path, input_model_1, input_model_2]
+def parse_config(filename):
+    config = configparser.ConfigParser()
+    config.read(filename)
+    output = {}
+    for section in config.sections():
+        output[section] = {}
+        for key in config[section]:
+            val_str = str(config[section][key])
+            if(len(val_str)>0):
+                val = parse_value_from_string(val_str) 
             else:
-                path = [baseline_path]
-            for path in paths:
-                for epoch in range(EPOCH_NUM):
-                    for i, data in enumerate(train, 0):
-                        # Create the discriminator made for the 64x64 images
-                        Disc_net = Disc(RGB_CHANNEL, HIDDEN_DIM_DISCR, DIM_IMAGE).to(dev)
-                        # Load the weights of the discriminator
-                        if DIM_IMAGE == 64:
-                            Disc_net.load_state_dict(torch.load(location_of_discriminator))
-                        elif DIM_IMAGE == 32:
-                            Disc_net.load_state_dict(torch.load(location_of_discriminator_32))
-                        elif DIM_IMAGE == 128:
-                            Disc_net.load_state_dict(torch.load(location_of_discriminator_128))
-                        # Load the images and labels 
-                        moving_imgs = data.to(dev)
-                        b_size = moving_imgs.size(0)
-                        label = torch.full((b_size,), R_LABEL, dtype=torch.float, device=dev)
-                        
-                        # Propagation through the Discriminator for the real images
-                        output = Disc_net(moving_imgs).view(-1)
-                        real_error_disc = BCE_crit(output, label)     
-                        # Generate noise
-                        noise = torch.randn(b_size, INPUT_NOISE_VECTOR, 1, 1, device=dev)
-
-                        with torch.no_grad():
-                            # load in autoregressive model weights
-                            load_path = str(path) + '/Model_Checkpoint_'+ str(epoch) +'.pt'
-                            if epoch == 24:
-                                load_path = str(path) + '/Model_Checkpoint_Last.pt'
-                            assert os.path.exists(load_path), 'Saved Model File Does not exist!'
-                            # standard parameters for the autoregressive model
-                            no_images = 128
-                            images_size = DIM_IMAGE
-                            images_channels = 1
-                            
-                            # load in the PixelCNN
-                            if images_size == 32:
-                                ch_numb = 200
-                            else:
-                                ch_numb = 64
-                            net = Model(ch_numb = ch_numb).to(dev)
-
-                            # load the state dictionary    
-                            curr_state_dict = torch.load(load_path)
-                            net.load_state_dict(curr_state_dict)
-                            # set evaluation mode, so that the model does not change the weights
-                            net.eval()
+                val = None
+            print(section, key,val_str, val)
+            output[section][key] = val
+    return output
 
 
-                            # create a tensor to store the generated images
-                            fake = torch.Tensor(no_images, images_channels, images_size, images_size).to(dev)
-                            # fill the tensor with zeros
-                            fake.fill_(0)
 
-                            #Generating images pixel by pixel
-                            for rows in range(images_size):
-                                for cols in range(images_size):
-                                    out = net(fake)
-                                    probability = F.softmax(out[:,:,rows,cols], dim=-1).data
-                                    fake[:,:,rows,cols] = torch.multinomial(probability, 1)
-                                    fake[:,:,rows,cols] = fake[:,:,rows,cols].float()
-                                    fake[:,:,rows,cols] = fake[:,:,rows,cols] / 255.0
+def parse_value_from_string(val_str):
+    if(is_int(val_str)):
+        val = int(val_str)
+    elif(is_float(val_str)):
+        val = float(val_str)
+    elif(is_list(val_str)):
+        val = parse_list(val_str)
+    elif(is_bool(val_str)):
+        val = parse_bool(val_str)
+    else:
+        val = val_str
+    return val
 
-                            # Saving images row wise
-                            torchvision.utils.save_image(fake, str(path) + '/auto_reg_epoch_'+ str(epoch)+'.png', nrow=12, padding=0)
-                        # Generate noise
-                        latent_vectors = torch.randn(b_size, INPUT_NOISE_VECTOR, 1, 1, device=dev)
-                        label.fill_(F_LABEL)
-                        # Classify all generated images
-                        class_output = Disc_net(fake.detach()).view(-1)
-                        # Calculate the discriminator loss for the generated images
-                        Disc_loss_fake = BCE_crit(class_output, label)
-                        # Calculate the average of the predictions of the discriminator over fake
-                        average_pred_fake = class_output.mean().item()
-                        # Calculate the total loss of the discriminator over the real and fake images
-                        errD = real_error_disc + Disc_loss_fake
-                        if path == baseline_path:
-                            list_of_disc_errors_baseline[epoch] = errD.item()
-                        elif path == input_model_1:
-                            list_of_disc_errors_500[epoch] = errD.item()
-                        else:
-                            list_of_disc_errors_300[epoch] = errD.item()
-                        print(epoch)
-                        print(errD.item())
+def is_int(val_str):
+    start_digit = 0
+    if(val_str[0] =='-'):
+        start_digit = 1
+    flag = True
+    for i in range(start_digit, len(val_str)):
+        if(str(val_str[i]) < '0' or str(val_str[i]) > '9'):
+            flag = False
+            break
+    return flag
+
+def is_float(val_str):
+    flag = False
+    if('.' in val_str and len(val_str.split('.'))==2):
+        if(is_int(val_str.split('.')[0]) and is_int(val_str.split('.')[1])):
+            flag = True
+        else:
+            flag = False
+    elif('e' in val_str and len(val_str.split('e'))==2):
+        if(is_int(val_str.split('e')[0]) and is_int(val_str.split('e')[1])):
+            flag = True
+        else:
+            flag = False
+    else:
+        flag = False
+    return flag 
+
+def is_bool(var_str):
+    if( var_str=='True' or var_str == 'true' or var_str =='False' or var_str=='false'):
+        return True
+    else:
+        return False
+
+def parse_bool(var_str):
+    if(var_str=='True' or var_str == 'true' ):
+        return True
+    else:
+        return False
+    
+def is_list(val_str):
+    if(val_str[0] == '[' and val_str[-1] == ']'):
+        return True
+    else:
+        return False
+
+def parse_list(val_str):
+    sub_str = val_str[1:-1]
+    splits = sub_str.split(',')
+    output = []
+    for item in splits:
+        item = item.strip()
+        if(is_int(item)):
+            output.append(int(item))
+        elif(is_float(item)):
+            output.append(float(item))
+        elif(is_bool(item)):
+            output.append(parse_bool(item))
+        else:
+            output.append(item)
+    return output 
+class MaskedCNN(nn.Conv2d):
+	"""
+	Implementation of Masked CNN Class as explained in A Oord et. al. 
+	Taken from https://github.com/jzbontar/pixelcnn-pytorch
+	"""
+
+	def __init__(self, mask_type, *args, **kwargs):
+		self.mask_type = mask_type
+		assert mask_type in ['A', 'B'], "Unknown Mask Type"
+		super(MaskedCNN, self).__init__(*args, **kwargs)
+		self.register_buffer('mask', self.weight.data.clone())
+
+		_, depth, height, width = self.weight.size()
+		self.mask.fill_(1)
+		if mask_type =='A':
+			self.mask[:,:,height//2,width//2:] = 0
+			self.mask[:,:,height//2+1:,:] = 0
+		else:
+			self.mask[:,:,height//2,width//2+1:] = 0
+			self.mask[:,:,height//2+1:,:] = 0
 
 
-                        break
-                if path == baseline_path:
-                    plt1.plot(list_of_epochs,list_of_disc_errors_baseline,label="Discriminator Loss of the baseline")
-                elif path == input_model_1 and version == "1":
-                    plt1.plot(list_of_epochs,list_of_disc_errors_500,label="Discriminator Loss of the autoreg model with lr = 5e-4")
-                elif path == input_model_1 and version == "2":
-                    plt1.plot(list_of_epochs,list_of_disc_errors_500,label="Discriminator Loss of the autoreg model with image size = 32")
-                elif path == input_model_2 and version == "1":
-                    plt1.plot(list_of_epochs,list_of_disc_errors_300,label="Discriminator Loss of the autoreg model with lr = 1e-5")
-                elif path == input_model_2 and version == "2":
-                    plt1.plot(list_of_epochs,list_of_disc_errors_300,label="Discriminator Loss of the autoreg model with image size = 128")
+	def forward(self, x):
+		self.weight.data*=self.mask
+		return super(MaskedCNN, self).forward(x)
+	
+class PixelCNN(nn.Module):
+	"""
+	Network of PixelCNN as described in A Oord et. al. 
+	"""
+	def __init__(self, no_layers=8, kernel = 7, channels=64, device=None, lr = 1e-4):
+		super(PixelCNN, self).__init__()
+		self.no_layers = no_layers
+		self.kernel = kernel
+		self.channels = channels
+		self.layers = {}
+		self.device = device
+		self.lr = lr
 
-    plt1.legend()
-    if version == "1":
-        fig.savefig("Discriminator_vs_autoreg_lr.png",dpi=300)
-    if version == "2":
-        fig.savefig("Discriminator_vs_autoreg_image_size.png",dpi=300)
-    if version == "3":
-        fig.savefig("Discriminator_vs_autoreg_baseline.png",dpi=300)
+		self.Conv2d_1 = MaskedCNN('A',1,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_1 = nn.BatchNorm2d(channels)
+		self.ReLU_1= nn.ReLU(True)
 
-if __name__=="__main__":
-	main()
+		self.Conv2d_2 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_2 = nn.BatchNorm2d(channels)
+		self.ReLU_2= nn.ReLU(True)
+
+		self.Conv2d_3 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_3 = nn.BatchNorm2d(channels)
+		self.ReLU_3= nn.ReLU(True)
+
+		self.Conv2d_4 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_4 = nn.BatchNorm2d(channels)
+		self.ReLU_4= nn.ReLU(True)
+
+		self.Conv2d_5 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_5 = nn.BatchNorm2d(channels)
+		self.ReLU_5= nn.ReLU(True)
+
+		self.Conv2d_6 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_6 = nn.BatchNorm2d(channels)
+		self.ReLU_6= nn.ReLU(True)
+
+		self.Conv2d_7 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_7 = nn.BatchNorm2d(channels)
+		self.ReLU_7= nn.ReLU(True)
+
+		self.Conv2d_8 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+		self.BatchNorm2d_8 = nn.BatchNorm2d(channels)
+		self.ReLU_8= nn.ReLU(True)
+	
+		if lr == 1e-5:
+			self.Conv2d_9 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+			self.BatchNorm2d_9 = nn.BatchNorm2d(channels)
+			self.ReLU_9= nn.ReLU(True)
+
+			self.Conv2d_10 = MaskedCNN('B',channels,channels, kernel, 1, kernel//2, bias=False)
+			self.BatchNorm2d_10 = nn.BatchNorm2d(channels)
+			self.ReLU_10 = nn.ReLU(True)
+		
+
+		self.out = nn.Conv2d(channels, 256, 1)
+
+	def forward(self, x):
+		x = self.Conv2d_1(x)
+		x = self.BatchNorm2d_1(x)
+		x = self.ReLU_1(x)
+
+		x = self.Conv2d_2(x)
+		x = self.BatchNorm2d_2(x)
+		x = self.ReLU_2(x)
+
+		x = self.Conv2d_3(x)
+		x = self.BatchNorm2d_3(x)
+		x = self.ReLU_3(x)
+
+		x = self.Conv2d_4(x)
+		x = self.BatchNorm2d_4(x)
+		x = self.ReLU_4(x)
+
+		x = self.Conv2d_5(x)
+		x = self.BatchNorm2d_5(x)
+		x = self.ReLU_5(x)
+
+		x = self.Conv2d_6(x)
+		x = self.BatchNorm2d_6(x)
+		x = self.ReLU_6(x)
+
+		x = self.Conv2d_7(x)
+		x = self.BatchNorm2d_7(x)
+		x = self.ReLU_7(x)
+
+		x = self.Conv2d_8(x)
+		x = self.BatchNorm2d_8(x)
+		x = self.ReLU_8(x)
+
+		if self.lr == 1e-5:
+			x = self.Conv2d_9(x)
+			x = self.BatchNorm2d_9(x)
+			x = self.ReLU_9(x)
+
+			x = self.Conv2d_10(x)
+			x = self.BatchNorm2d_10(x)
+			x = self.ReLU_10(x)
+
+		return self.out(x)
+      
+CUDA = True
+DATA_PATH = './data'
+BATCH_SIZE = 128
+IMAGE_CHANNEL = 1
+Z_DIM = 100
+G_HIDDEN = 64
+X_DIM = 64
+D_HIDDEN = 64
+EPOCH_NUM = 24
+REAL_LABEL = 1
+FAKE_LABEL = 0
+
+lr = 1e-4
+seed = 1
+
+CUDA = CUDA and torch.cuda.is_available()
+print("PyTorch version: {}".format(torch.__version__))
+if CUDA:
+    print("CUDA version: {}\n".format(torch.version.cuda))
+
+if CUDA:
+    torch.cuda.manual_seed(seed)
+DEVICE = torch.device("cuda:0" if CUDA else "cpu")
+cudnn.benchmark = True
+
+    # Example usage:
+# os.chdir('..')
+# os.chdir('..')
+# root_dir = r'/data/s3287297/NIH_data/images'
+# txt_file = r'/data/s3287297/NIH_data/train_val_list.txt'
+# txt_file_test = r'/data/s3287297/NIH_data/test_list.txt'
+root_dir = r'NIH_data/images'
+txt_file = r'NIH_data/train_val_list.txt'
+txt_file_test = r'NIH_data/test_list.txt'
+
+# Define your transform
+transform = transforms.Compose([
+    transforms.Resize((X_DIM)),  # Resize image to (224, 224)
+    transforms.Grayscale(num_output_channels=1),  # Convert image to grayscale
+    transforms.ToTensor(),  # Convert PIL Image to tensor
+    transforms.Normalize((0.5,), (0.5,))  # Normalize the tensor with mean and standard deviation
+])
+
+# Create custom dataset instance
+custom_dataset = CustomImageDataset(folder=root_dir, txt_file=txt_file, trans=transform)
+custom_dataset_test = CustomImageDataset(folder=root_dir, txt_file=txt_file_test, trans=transform)
+
+
+# Define the size of your training and testing sets
+train_size = custom_dataset # 80% of the dataset for training
+test_size = custom_dataset_test  # 20% of the dataset for testing
+
+
+
+# Create DataLoaders for training and testing sets
+train_loader = torch.utils.data.DataLoader(train_size, batch_size=BATCH_SIZE, shuffle=True)
+test_loader = torch.utils.data.DataLoader(test_size, batch_size=BATCH_SIZE, shuffle=True)
+
+
+# Create the discriminator
+img_size = 64
+netD = Discriminator(IMAGE_CHANNEL, D_HIDDEN, img_size).to(DEVICE)
+netD.load_state_dict(torch.load('disc_64/discriminator_49.pth'))
+            
+# Initialize BCELoss function
+criterion = nn.BCELoss()
+
+# Create batch of latent vectors that I will use to visualize the progression of the generator
+viz_noise = torch.randn(BATCH_SIZE, Z_DIM, 1, 1, device=DEVICE)
+
+# Setup Adam optimizers for both G and D
+optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=(0.5, 0.999))
+
+# Lists to keep track of progress
+img_list = []
+G_losses = []
+D_losses = []
+iters = 0
+
+
+# Create DataLoader
+dataloader = torch.utils.data.DataLoader(custom_dataset, batch_size=128, shuffle=True)
+print("Starting Training Loop...")
+print("Starting Testing Loop...")
+# list_of_disc_errors_500 = [3.67794132232666, 3.503178119659424, 3.6076016426086426, 3.2208688259124756, 3.860383987426758, 3.8884263038635254, 3.5787596702575684, 4.286342144012451, 3.7707061767578125, 3.720978021621704, 3.254955530166626, 3.0980122089385986, 3.4185142517089844, 3.418964147567749, 3.989417314529419, 3.519407272338867, 3.5756218433380127, 4.06866455078125, 3.508878231048584, 3.6577486991882324, 3.6472702026367188, 4.0691304206848145, 3.7421486377716064, 3.6138362884521484, 4.099040508270264 ]
+# list_of_disc_errors_300 = [69.31978607177734, 69.20040130615234, 69.24744415283203, 69.27139282226562, 69.21062469482422, 69.39337921142578, 69.55066680908203, 69.40667724609375, 69.22758483886719, 69.4830551147461, 69.5771713256836, 69.32005310058594, 69.31959533691406, 69.28053283691406, 69.39614868164062, 69.37401580810547, 69.03463745117188, 69.16797637939453, 69.31694793701172, 68.93363952636719, 69.4273910522461, 69.13243103027344, 69.41190338134766, 69.30957794189453, 69.27418518066406 ]
+# list_of_disc_errors_baseline = [23.622438430786133, 24.197343826293945, 23.40094566345215, 23.98157501220703, 23.79994010925293, 23.728822708129883, 23.974998474121094, 23.890085220336914, 24.14176368713379, 23.74187660217285, 23.650381088256836, 24.00697135925293, 24.07979393005371, 23.579343795776367, 24.249757766723633, 23.928030014038086, 23.831193923950195, 23.691335678100586, 23.59296226501465, 23.849149703979492, 23.411224365234375, 23.728271484375,24.34131622314453, 23.822879791259766, 24.16730499267578 ]
+list_of_epochs = np.arange(0, EPOCH_NUM, 1)
+list_of_disc_errors_500 = np.zeros(EPOCH_NUM)
+list_of_disc_errors_300 = np.zeros(EPOCH_NUM)
+list_of_disc_errors_baseline = np.zeros(EPOCH_NUM)
+fig, plt1 = plt.subplots()
+plt1.set_xlabel('Epoch')
+plt1.set_ylabel('Discriminator Loss')      
+plt1.set_title("Discriminator Loss vs epoch Autoregressive model")
+for epoch in range(EPOCH_NUM):
+    for i, data in enumerate(dataloader, 0):
+        img_size = 64
+        netD = Discriminator(IMAGE_CHANNEL, D_HIDDEN, img_size).to(DEVICE)
+        netD.load_state_dict(torch.load('disc_64/discriminator_49.pth'))  
+        real_cpu = data[0].to(DEVICE)
+        b_size = real_cpu.size(0)
+        label = torch.full((b_size,), REAL_LABEL, dtype=torch.float, device=DEVICE)
+        print(torch.Tensor.size(real_cpu))
+        # if label.size(dim=0) != 64:
+        #     top, left, bottom, right = 0, 0, 120, 120
+        # else:
+        #     top, left, bottom, right = 0, 0, 3, 2  # Example coordinates
+
+        # Extract the region using slicing
+        # This will extract the region from each image in the batch
+        # real_cpu = real_cpu[top:bottom, left:right]
+        # show_and_save_image(real_cpu[0], '/data/s3287297/NIH_VAE/after_slicing.png')
+        output = netD(real_cpu).view(-1)
+        errD_real = criterion(output, label)     
+        # (2) Update the discriminator with fake data
+        # Generate batch of latent vectors
+        noise = torch.randn(b_size, Z_DIM, 1, 1, device=DEVICE)
+
+        with torch.no_grad():
+            config_file = sys.argv[1]
+            assert os.path.exists(config_file), "Configuration file does not exit!"
+            config = parse_config(config_file)
+            model = config['model']
+            images = config['images']
+            load_path = 'models_baseline_try_3/Model_Checkpoint_'+ str(epoch) +'.pt'
+            if epoch == 24:
+                load_path = 'models_baseline_try_3/Model_Checkpoint_Last.pt'
+            # if epoch > 24 and epoch < 49:
+            #     load_path = '/data/s3287297/last_try_autoreg/Model_Checkpoint_'+ str(epoch) +'_lr=0.0001img_dim=64.pt'
+            # if epoch == 49:
+            #     load_path = '/data/s3287297/last_try_autoreg/Model_Checkpoint_Last_lr=0.0001img_dim=64.pt'
+            assert os.path.exists(load_path), 'Saved Model File Does not exist!'
+            no_images = images.get('no_images', 128)
+            images_size = images.get('images_size', 64)
+            images_channels = images.get('images_channels', 1)
+            
+
+            #Define and load model
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            net = PixelCNN(channels = 64).to(device)
+            if torch.cuda.device_count() > 1: #Accelerate testing if multiple GPUs available
+                print("Let's use", torch.cuda.device_count(), "GPUs!")
+                net = nn.DataParallel(net)
+            state_dict = torch.load(load_path)
+            # Add 'module.' prefix to each key
+            # new_state_dict = {'module.' + k: v for k, v in state_dict.items()}
+            net.load_state_dict(state_dict)
+            net.eval()
+
+
+
+            fake = torch.Tensor(no_images, images_channels, images_size, images_size).to(device)
+            fake.fill_(0)
+
+            #Generating images pixel by pixel
+            for i in range(images_size):
+                for j in range(images_size):
+                    out = net(fake)
+                    probs = F.softmax(out[:,:,i,j], dim=-1).data
+                    fake[:,:,i,j] = torch.multinomial(probs, 1).float() / 255.0
+
+            #Saving images row wise
+            torchvision.utils.save_image(fake, 'models_baseline_try_3/auto_reg_epoch_'+ str(epoch)+'.png', nrow=12, padding=0)
+        output = netD(fake.detach()).view(-1)
+        # Calculate D's loss on the all-fake batch
+        print(output.size())
+        print(label.size())
+        errD_fake = criterion(output, label)
+        D_G_z1 = output.mean().item()
+        # Compute error of D as sum over the fake and the real batches
+        errD = errD_real + errD_fake
+        list_of_disc_errors_baseline[epoch] = errD.item()
+        print(epoch)
+        print(errD.item())
+        # Open the file in append mode ('a') and write the loss value
+        with open('models_baseline_try_3/loss_values.txt', 'a') as file:
+            file.write(f"{errD.item()}\n")  # Add a newline character to separate entries
+
+
+        with torch.no_grad():
+            img_size = 64
+            netD = Discriminator(IMAGE_CHANNEL, D_HIDDEN, img_size).to(DEVICE)
+            netD.load_state_dict(torch.load('disc_64/discriminator_49.pth'))
+            config_file = sys.argv[2]
+            assert os.path.exists(config_file), "Configuration file does not exit!"
+            config = parse_config(config_file)
+            model = config['model']
+            images = config['images']
+            
+            load_path = 'models_5e-4/Model_Checkpoint_'+ str(epoch) +'.pt'
+            if EPOCH_NUM == 24:
+                load_path = 'models_5e-4/Model_Checkpoint_Last.pt'
+            assert os.path.exists(load_path), 'Saved Model File Does not exist!'
+            no_images = images.get('no_images', 128)
+            images_size = 64
+            images_channels = images.get('images_channels', 1)
+            
+
+            #Define and load model
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            net = PixelCNN(channels = 64, lr=5e-4).to(device)
+            if torch.cuda.device_count() > 1: #Accelerate testing if multiple GPUs available
+                print("Let's use", torch.cuda.device_count(), "GPUs!")
+                net = nn.DataParallel(net)
+            net.load_state_dict(torch.load(load_path))
+            net.eval()
+
+
+
+            fake = torch.Tensor(no_images, images_channels, images_size, images_size).to(device)
+            fake.fill_(0)
+
+            #Generating images pixel by pixel
+            for i in range(images_size):
+                for j in range(images_size):
+                    out = net(fake)
+                    probs = F.softmax(out[:,:,i,j], dim=-1).data
+                    fake[:,:,i,j] = torch.multinomial(probs, 1).float() / 255.0
+
+            #Saving images row wise
+            torchvision.utils.save_image(fake, 'models_5e-4/auto_reg_epoch_'+ str(epoch)+'.png', nrow=12, padding=0)
+        output = netD(fake.detach()).view(-1)
+        # Calculate D's loss on the all-fake batch
+        print(output.size())
+        print(label.size())
+        errD_fake = criterion(output, label)
+        D_G_z1 = output.mean().item()
+        # Compute error of D as sum over the fake and the real batches
+        errD = errD_real + errD_fake
+        list_of_disc_errors_300[epoch] = errD.item()
+        print(epoch)
+        print(errD.item())
+        # Open the file in append mode ('a') and write the loss value
+        with open('models_5e-4/loss_values.txt', 'a') as file:
+            file.write(f"{errD.item()}\n")  # Add a newline character to separate entries
+
+
+
+        with torch.no_grad():
+            img_size = 64
+            netD = Discriminator(IMAGE_CHANNEL, D_HIDDEN, img_size).to(DEVICE)
+            netD.load_state_dict(torch.load('disc_64/discriminator_49.pth'))
+            config_file = sys.argv[3]
+            assert os.path.exists(config_file), "Configuration file does not exit!"
+            config = parse_config(config_file)
+            model = config['model']
+            images = config['images']
+            
+            load_path = 'models_1e-5/Model_Checkpoint_'+ str(epoch) +'.pt'
+            if EPOCH_NUM == 24:
+                load_path = 'models_1e-5/Model_Checkpoint_Last.pt'
+            assert os.path.exists(load_path), 'Saved Model File Does not exist!'
+            no_images = images.get('no_images', 128)
+            images_size = 64
+            images_channels = images.get('images_channels', 1)
+            
+
+            #Define and load model
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            net = PixelCNN(channels = 64, lr=1e-5).to(device)
+            if torch.cuda.device_count() > 1: #Accelerate testing if multiple GPUs available
+                print("Let's use", torch.cuda.device_count(), "GPUs!")
+                net = nn.DataParallel(net)
+            net.load_state_dict(torch.load(load_path))
+            net.eval()
+
+
+
+            fake = torch.Tensor(no_images, images_channels, images_size, images_size).to(device)
+            fake.fill_(0)
+
+            #Generating images pixel by pixel
+            for i in range(images_size):
+                for j in range(images_size):
+                    out = net(fake)
+                    probs = F.softmax(out[:,:,i,j], dim=-1).data
+                    fake[:,:,i,j] = torch.multinomial(probs, 1).float() / 255.0
+
+            #Saving images row wise
+            torchvision.utils.save_image(fake, 'models_1e-5/auto_reg_epoch_'+ str(epoch)+'.png', nrow=12, padding=0)
+        output = netD(fake.detach()).view(-1)
+        # Calculate D's loss on the all-fake batch
+        print(output.size())
+        print(label.size())
+        errD_fake = criterion(output, label)
+        D_G_z1 = output.mean().item()
+        # Compute error of D as sum over the fake and the real batches
+        errD = errD_real + errD_fake
+        list_of_disc_errors_500[epoch] = errD.item()
+        print(epoch)
+        print(errD.item())
+        # Open the file in append mode ('a') and write the loss value
+        with open('models_1e-5/loss_values.txt', 'a') as file:
+            file.write(f"{errD.item()}\n")  # Add a newline character to separate entries
+        break
+plt1.plot(list_of_epochs,list_of_disc_errors_300,label="Discriminator Loss of the autoreg model with lr = 5e-4")
+plt1.plot(list_of_epochs,list_of_disc_errors_500,label="Discriminator Loss of the autoreg model with lr = 1e-5")
+plt1.plot(list_of_epochs,list_of_disc_errors_baseline,label="Discriminator Loss of baseline")
+plt1.legend()
+fig.savefig("/data/s3287297/Discriminator_vs_autoreg_lr_attempt_2.png",dpi=300)
