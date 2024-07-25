@@ -201,7 +201,6 @@ class Model(torch.nn.Module):
 
 
 def main():
-	os.chdir("..")
 	# Only use CUDA if wanted and available
 	CUDA = True
 	version = input("Which version of the model do you want to train? 1 = learning rate, 2 = Image size, 3 = Baseline")

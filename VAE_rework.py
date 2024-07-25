@@ -181,7 +181,6 @@ def loss_function(x, x_hat, mean, log_var):
 
 
 def main():
-    os.chdir("..")
     # If cuda is available, use it
     CUDA = True
     seed = 1

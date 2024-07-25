@@ -54,7 +54,6 @@ class LoadImages:
     
 # Main function for training GAN    
 def main():
-    os.chdir("..")
     # Print that the GAN training is starting
     print("Starting GAN training...")
     # Flag to use CUDA

@@ -109,8 +109,6 @@ class LoadImages:
 
 class train:
     def __init__(self):
-        os.chdir("..")
-        os.chdir("..")
         self.directory_of_images = input("Please select the directory of images")
         self.location_of_txt_file = input("the location of the training txt files")
         self.train_conf = configuration()
