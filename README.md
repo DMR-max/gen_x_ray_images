@@ -1,6 +1,7 @@
 # Deep learning algorithms for training data: focused on chest X-ray images
 This readme explains how to run the experiments. \
 First download the NIH chest X-ray dataset and put all images in one folder, with the train_val_list.txt and the test_list.txt.
+then create a conda or python environment (for conda use requirements_conda.txt for python use requirements_pip.txt). For the experiments miniconda was originally used.
 Steps to train one algorithm:
 1. install python, pytorch, matplotlib, huggingface libraries from the requirements.txt file.
 2. launch either gan_rework for the GAN, Stable_diff_rework for the diffusion model. VAE_rework for the VAE, autoregressive_rework for the autoregressive models.
